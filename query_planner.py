@@ -1,33 +1,29 @@
 """
-查询规划器
-根据实体识别结果，智能生成 Cypher 查询
+查询规划器（精简版）
+使用统一查询构建器生成所有类型的查询
 """
 
 import json
 from typing import Dict, List, Optional
 from llm_client import LLMClient
 from schemas import query_plan_schema
+from utils import build_time_filter, extract_time_params, build_keyword_filter, merge_params
 
 
 class QueryPlanner:
-    """智能查询规划器"""
+    """查询规划器"""
 
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, unified_query_builder=None):
         self.llm_client = llm_client
-        # 实体别名映射（用于处理同一实体的不同名称）
-        self.entity_aliases = {
-            'Gulfstream': ['Gulfstream', 'Gulfstream Aerospace'],
-            'Gulfstream Aerospace': ['Gulfstream', 'Gulfstream Aerospace'],
-            'NetJets': ['NetJets'],  # 可以继续扩展
-        }
+        self.unified_query_builder = unified_query_builder
 
-    def _expand_entity_names(self, entity_name: str) -> list:
-        """扩展实体名称，包括其可能的别名"""
-        # 如果在别名映射中，返回所有别名
-        if entity_name in self.entity_aliases:
-            return self.entity_aliases[entity_name]
-        # 否则只返回原名称
-        return [entity_name]
+    def _expand_entity_names(self, entity: Dict) -> List[str]:
+        """扩展实体名称，包括其可能的别名（从entity的aliases字段获取）"""
+        # 优先使用entity中的aliases字段（来自QueryRewriter）
+        if 'aliases' in entity and entity['aliases']:
+            return entity['aliases']
+        # 否则只返回实体名称
+        return [entity.get('name', '')]
 
     def plan(
         self,
@@ -35,35 +31,39 @@ class QueryPlanner:
         recognition_result: Dict
     ) -> Optional[Dict]:
         """
-        生成查询计划
+        生成查询计划（使用统一构建器）
 
         Args:
             question: 原始问题
             recognition_result: 实体识别结果
 
         Returns:
-            {
-                "strategy": "multi_hop",
-                "cypher_queries": [
-                    {
-                        "description": "Find all products manufactured by Gulfstream",
-                        "cypher": "MATCH (c:Company {name: 'Gulfstream'})-[:MANUFACTURES]->(p:Product) RETURN p",
-                        "priority": 1
-                    }
-                ],
-                "max_results": 20,
-                "reasoning": "..."
-            }
+            查询计划
         """
-        # 根据意图选择策略
-        intent = recognition_result.get('intent', 'entity_info')
+        # 优先使用统一查询构建器
+        if self.unified_query_builder:
+            print("[*] 使用统一查询构建器...")
 
-        # 简单意图使用规则生成
-        if intent in ['entity_info', 'relation_query', 'event_query'] and len(recognition_result.get('entities', [])) <= 2:
-            return self._rule_based_plan(question, recognition_result)
+            try:
+                cypher_queries = self.unified_query_builder.build_query(
+                    recognition_result,
+                    question
+                )
 
-        # 复杂意图使用 LLM 生成
-        return self._llm_based_plan(question, recognition_result)
+                if cypher_queries:
+                    return {
+                        "strategy": "unified",
+                        "cypher_queries": cypher_queries,
+                        "max_results": 100,
+                        "reasoning": f"Using unified query builder for {recognition_result.get('intent')}"
+                    }
+            except Exception as e:
+                print(f"[!] 统一查询构建器失败: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # 后备方案：使用规则
+        return self._rule_based_plan(question, recognition_result)
 
     def _rule_based_plan(self, question: str, recognition_result: Dict) -> Dict:
         """基于规则的查询规划（快速路径）"""
@@ -73,77 +73,71 @@ class QueryPlanner:
 
         cypher_queries = []
 
-        # entity_info: 查询单个实体
-        if intent == 'entity_info' and len(entities) == 1:
-            entity = entities[0]
+        # entity_info: 查询实体信息（支持单个或多个实体）
+        if intent == 'entity_info' and len(entities) >= 1:
+            for idx, entity in enumerate(entities):
+                entity_names = self._expand_entity_names(entity)
 
-            # 扩展实体名称（包括别名）
-            entity_names = self._expand_entity_names(entity['name'])
-
-            cypher = f"""
+                cypher = f"""
 MATCH (n:{entity['type']})
 WHERE n.name IN $entity_names
 OPTIONAL MATCH (n)-[r]-(m)
 RETURN n, type(r) as relation_type, labels(m)[0] as related_type,
        coalesce(m.name, m.id) as related_name, properties(m) as related_props
 LIMIT 50
-            """.strip()
-            cypher_queries.append({
-                "description": f"Query entity info for {entity['name']} (including aliases)",
-                "cypher": cypher,
-                "priority": 1,
-                "params": {"entity_names": entity_names}
-            })
-
-        # relation_query: 查询关系
-        elif intent == 'relation_query' and len(entities) >= 1:
-            entity = entities[0]
-
-            # 扩展实体名称（包括别名）
-            entity_names = self._expand_entity_names(entity['name'])
-
-            # 如果指定了关系类型
-            if relation_types:
-                for rel_type in relation_types[:3]:  # 最多3个
-                    # 双向查询：既查"A->B"也查"B->A"，同时匹配所有可能的实体名称
-                    cypher = f"""
-MATCH (n)-[r:{rel_type}]-(m)
-WHERE n.name IN $entity_names
-RETURN type(r) as relation_type, labels(m)[0] as target_type,
-       coalesce(m.name, m.id) as target_name, properties(m) as target_props,
-       startNode(r).name IN $entity_names as is_outgoing
-LIMIT 30
-                    """.strip()
-                    cypher_queries.append({
-                        "description": f"Query {rel_type} relations for {entity['name']} (including aliases)",
-                        "cypher": cypher,
-                        "priority": 1,
-                        "params": {"entity_names": entity_names}
-                    })
-            else:
-                # 查询所有双向关系
-                cypher = f"""
-MATCH (n)-[r]-(m)
-WHERE n.name IN $entity_names
-RETURN type(r) as relation_type, labels(m)[0] as target_type,
-       coalesce(m.name, m.id) as target_name, properties(m) as target_props,
-       startNode(r).name IN $entity_names as is_outgoing
-LIMIT 50
                 """.strip()
                 cypher_queries.append({
-                    "description": f"Query all relations for {entity['name']} (including aliases)",
+                    "description": f"Query entity info for {entity['name']}",
                     "cypher": cypher,
-                    "priority": 1,
+                    "priority": idx + 1,
                     "params": {"entity_names": entity_names}
                 })
+
+        # relation_query: 查询关系（使用智能查询引擎）
+        elif intent == 'relation_query' and len(entities) >= 1:
+            # 优先使用智能查询引擎
+            if self.intelligent_query_engine:
+                print("[*] 使用智能查询引擎...")
+
+                for idx, entity in enumerate(entities):
+                    entity_names = self._expand_entity_names(entity)
+                    entity_type = entity['type']
+
+                    # 使用智能查询引擎生成查询
+                    intelligent_query = self.intelligent_query_engine.generate_intelligent_query(
+                        entity_name=entity['name'],
+                        entity_type=entity_type,
+                        question=question,
+                        entity_aliases=entity_names
+                    )
+
+                    if intelligent_query:
+                        cypher_queries.append({
+                            "description": intelligent_query['description'],
+                            "cypher": intelligent_query['cypher'],
+                            "priority": idx + 1,
+                            "params": intelligent_query['params'],
+                            "strategy": "intelligent"
+                        })
+                        print(f"[✓] 为 {entity['name']} 生成智能查询")
+                    else:
+                        print(f"[!] 智能查询失败，使用后备方案")
+                        # 后备方案：简单查询
+                        self._add_fallback_query(entity, entity_names, cypher_queries, idx + 1)
+
+            else:
+                # 没有智能查询引擎，使用传统方案
+                for idx, entity in enumerate(entities):
+                    entity_names = self._expand_entity_names(entity)
+                    self._add_fallback_query(entity, entity_names, cypher_queries, idx + 1)
 
         # comparison: 对比两个实体
         elif intent == 'comparison' and len(entities) == 2:
             entity1, entity2 = entities[0], entities[1]
 
-            # 分别查询两个实体（包括别名）
+            # 分别查询两个实体
             for entity in [entity1, entity2]:
-                entity_names = self._expand_entity_names(entity['name'])
+                entity_names = self._expand_entity_names(entity)
 
                 cypher = f"""
 MATCH (n:{entity['type']})
@@ -154,13 +148,16 @@ RETURN n, type(r) as relation_type, labels(m)[0] as related_type,
 LIMIT 30
                 """.strip()
                 cypher_queries.append({
-                    "description": f"Query {entity['name']} for comparison (including aliases)",
+                    "description": f"Query {entity['name']} for comparison",
                     "cypher": cypher,
                     "priority": 1,
                     "params": {"entity_names": entity_names}
                 })
 
-            # 查询两者之间的路径
+            # 查询两者之间的路径（使用第一个别名）
+            entity1_name = self._expand_entity_names(entity1)[0]
+            entity2_name = self._expand_entity_names(entity2)[0]
+
             cypher = f"""
 MATCH path = shortestPath((n1 {{name: $entity1_name}})-[*..4]-(n2 {{name: $entity2_name}}))
 RETURN path
@@ -171,8 +168,8 @@ LIMIT 5
                 "cypher": cypher,
                 "priority": 2,
                 "params": {
-                    "entity1_name": entity1['name'],
-                    "entity2_name": entity2['name']
+                    "entity1_name": entity1_name,
+                    "entity2_name": entity2_name
                 }
             })
 
@@ -182,33 +179,15 @@ LIMIT 5
             time_constraint = recognition_result.get('time_constraint', {})
             event_keywords = recognition_result.get('event_keywords', {})
 
-            # 提取时间约束（支持多种键名）
-            start_date = time_constraint.get('start') or time_constraint.get('start_date')
-            end_date = time_constraint.get('end') or time_constraint.get('end_date')
-
             # 构建时间过滤条件
-            def build_time_filter():
-                if start_date and end_date:
-                    return f"AND e.date >= date($start_date) AND e.date <= date($end_date)"
-                elif start_date:
-                    return f"AND e.date >= date($start_date)"
-                elif end_date:
-                    return f"AND e.date <= date($end_date)"
-                return ""
-
-            time_filter = build_time_filter()
+            time_filter = build_time_filter(time_constraint)
 
             # 策略A：如果有event_keywords，使用文本搜索（泛化策略）
             if event_keywords and event_keywords.get('domain_keywords'):
                 domain_keywords = event_keywords['domain_keywords']
 
-                # 构建关键词搜索条件（使用OR连接多个CONTAINS）
-                keyword_conditions = []
-                for i, kw in enumerate(domain_keywords[:10]):  # 限制最多10个关键词避免查询过长
-                    param_name = f"kw_{i}"
-                    keyword_conditions.append(f"toLower(e.description) CONTAINS toLower(${param_name})")
-
-                keyword_filter = " OR ".join(keyword_conditions)
+                # 使用工具函数构建关键词过滤条件
+                keyword_filter, keyword_params = build_keyword_filter(domain_keywords, "e.description", max_keywords=10)
 
                 cypher = f"""
 MATCH (e:Event)
@@ -219,14 +198,8 @@ ORDER BY e.date DESC
 LIMIT 100
                 """.strip()
 
-                # 构建参数
-                params = {}
-                for i, kw in enumerate(domain_keywords[:10]):
-                    params[f"kw_{i}"] = kw
-                if start_date:
-                    params["start_date"] = start_date
-                if end_date:
-                    params["end_date"] = end_date
+                # 合并参数
+                params = merge_params(keyword_params, extract_time_params(time_constraint))
 
                 event_types_str = ", ".join(event_keywords.get('event_types', []))
                 cypher_queries.append({
@@ -239,7 +212,7 @@ LIMIT 100
             # 策略B：如果有实体，使用实体关系查询（保留原有功能）
             if entities and len(entities) >= 1:
                 entity = entities[0]
-                entity_names = self._expand_entity_names(entity['name'])
+                entity_names = self._expand_entity_names(entity)
                 entity_type = entity['type']
 
                 # 根据实体类型构建正确的查询方向
@@ -254,11 +227,11 @@ ORDER BY e.date DESC
 LIMIT 50
                     """.strip()
 
-                    params = {"entity_names": entity_names}
-                    if start_date:
-                        params["start_date"] = start_date
-                    if end_date:
-                        params["end_date"] = end_date
+                    # 合并参数
+                    params = merge_params(
+                        {"entity_names": entity_names},
+                        extract_time_params(time_constraint)
+                    )
 
                     # 如果同时有event_keywords，这个查询优先级降低
                     priority = 2 if event_keywords else 1
@@ -276,6 +249,24 @@ LIMIT 50
             "max_results": 50,
             "reasoning": f"Using rule-based planning for {intent}"
         }
+
+    def _add_fallback_query(self, entity: Dict, entity_names: List[str], cypher_queries: List, priority: int):
+        """添加后备查询（当智能查询失败时）"""
+        # 简单的关系查询
+        cypher = f"""
+MATCH (n)-[r]-(m)
+WHERE n.name IN $entity_names
+RETURN type(r) as relation_type, labels(m)[0] as target_type,
+       coalesce(m.name, m.id) as target_name, properties(m) as target_props,
+       startNode(r).name IN $entity_names as is_outgoing
+LIMIT 50
+        """.strip()
+        cypher_queries.append({
+            "description": f"Fallback query for {entity['name']}",
+            "cypher": cypher,
+            "priority": priority,
+            "params": {"entity_names": entity_names}
+        })
 
     def _llm_based_plan(self, question: str, recognition_result: Dict) -> Optional[Dict]:
         """基于 LLM 的查询规划（复杂场景）"""

@@ -12,22 +12,24 @@ from schemas import entity_recognition_schema
 class EntityRecognizer:
     """实体识别和意图理解"""
 
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, query_rewriter=None):
         self.llm_client = llm_client
+        self.query_rewriter = query_rewriter
 
     def recognize(self, question: str) -> Optional[Dict]:
         """
-        识别问题中的实体和意图
+        识别问题中的实体和意图（带查询改写）
 
         Args:
             question: 用户问题
 
         Returns:
             {
-                "entities": [{"name": "NetJets", "type": "Company", "confidence": 0.95}],
+                "entities": [{"name": "NetJets", "type": "Company", "confidence": 0.95, "aliases": [...]}],
                 "intent": "relation_query",
                 "relation_types": ["MANUFACTURES", "USES"],
-                "time_constraint": {"start_date": "2025-01-01", "end_date": "2025-12-31"}
+                "time_constraint": {"start_date": "2025-01-01", "end_date": "2025-12-31"},
+                "rewrite_notes": ["查询扩展：Global 7500"]
             }
         """
         prompt = self._build_prompt()
@@ -45,6 +47,14 @@ class EntityRecognizer:
 
         try:
             result = json.loads(response)
+
+            # 使用QueryRewriter进行查询改写和实体扩展
+            if self.query_rewriter:
+                result, rewrite_notes = self.query_rewriter.rewrite_query(question, result)
+                if rewrite_notes:
+                    result['rewrite_notes'] = rewrite_notes
+                    print(f"[*] 查询改写: {', '.join(rewrite_notes)}")
+
             return result
         except json.JSONDecodeError as e:
             print(f"[X] 实体识别 JSON 解析失败: {e}")
@@ -79,10 +89,11 @@ Entity Types:
 Intent Types:
 - entity_info: Query info about a single entity (e.g., "What is NetJets?")
 - relation_query: Query relationships (e.g., "What aircraft does NetJets operate?")
+- list_query: List/enumerate entities (e.g., "有哪些机场？", "What airports are in the database?")
+- count_query: Count/statistics (e.g., "有多少航线？", "How many routes?")
+- exploration_query: Explore database (e.g., "数据库里有什么数据？", "What data do you have?")
 - comparison: Compare entities (e.g., "Compare G650 and Global 7500")
-- event_query: Query events (e.g., "What deliveries happened in 2025?", "去年有哪些航空事故？")
-- chain_analysis: Supply chain analysis (e.g., "Who supplies engines to Gulfstream?")
-- impact_analysis: Impact analysis (e.g., "How does the Honeywell lawsuit affect operators?")
+- event_query: Query events (e.g., "What deliveries happened in 2025?")
 - general_question: General questions
 
 IMPORTANT for event_query:
@@ -110,6 +121,16 @@ A: {
   ],
   "intent": "relation_query",
   "relation_types": ["OPERATES", "USES"]
+}
+
+Q: "庞巴迪 Global 7500最火的几条航线记录"
+A: {
+  "entities": [
+    {"name": "Bombardier", "type": "Company", "confidence": 0.95},
+    {"name": "Global 7500", "type": "Product", "confidence": 0.95}
+  ],
+  "intent": "relation_query",
+  "relation_types": ["HAS_ROUTE", "OPERATES_ON"]
 }
 
 Q: "Gulfstream 在 2025 年交付了多少架 G650？"
@@ -173,6 +194,26 @@ A: {
     "event_types": ["监管", "政策"],
     "domain_keywords": ["regulatory", "regulation", "policy", "compliance", "FAA", "aviation"]
   }
+}
+
+Q: "数据库中有哪些机场？"
+A: {
+  "entities": [],
+  "intent": "list_query",
+  "keywords": ["机场"]
+}
+
+Q: "有多少航线数据？"
+A: {
+  "entities": [],
+  "intent": "count_query",
+  "keywords": ["航线"]
+}
+
+Q: "数据库里都有什么数据？"
+A: {
+  "entities": [],
+  "intent": "exploration_query"
 }
 
 Now analyze the following question:

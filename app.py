@@ -13,12 +13,11 @@ from entity_recognizer import EntityRecognizer
 from query_planner import QueryPlanner
 from kg_retriever import KGRetriever
 from answer_generator import AnswerGenerator
+from query_rewriter import QueryRewriter
+from unified_query_builder import UnifiedQueryBuilder
 
+from config import NEO4J_URI ,NEO4J_USER,NEO4J_PASSWORD
 
-# ========== 配置 ==========
-NEO4J_URI = 
-NEO4J_USER = 
-NEO4J_PASSWORD = 
 
 # ========== 初始化 ==========
 app = Flask(__name__)
@@ -27,14 +26,16 @@ CORS(app)
 # 全局单例
 llm_client = None
 kg_retriever = None
+query_rewriter = None
 entity_recognizer = None
 query_planner = None
 answer_generator = None
+unified_query_builder = None
 
 
 def get_services():
     """获取或创建服务实例（单例模式）"""
-    global llm_client, kg_retriever, entity_recognizer, query_planner, answer_generator
+    global llm_client, kg_retriever, query_rewriter, entity_recognizer, query_planner, answer_generator, unified_query_builder
 
     # 初始化基础服务
     if llm_client is None:
@@ -42,16 +43,25 @@ def get_services():
     if kg_retriever is None:
         kg_retriever = KGRetriever(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
 
-    # 初始化依赖LLM的服务
-    services = [
-        ('entity_recognizer', EntityRecognizer),
-        ('query_planner', QueryPlanner),
-        ('answer_generator', AnswerGenerator)
-    ]
+    # 初始化QueryRewriter（需要LLM和KG）
+    if query_rewriter is None:
+        query_rewriter = QueryRewriter(llm_client, kg_retriever)
 
-    for var_name, ServiceClass in services:
-        if globals()[var_name] is None:
-            globals()[var_name] = ServiceClass(llm_client)
+    # 初始化EntityRecognizer（需要LLM和QueryRewriter）
+    if entity_recognizer is None:
+        entity_recognizer = EntityRecognizer(llm_client, query_rewriter)
+
+    # 初始化统一查询构建器（需要KG）
+    if unified_query_builder is None:
+        unified_query_builder = UnifiedQueryBuilder(kg_retriever)
+
+    # 初始化QueryPlanner（需要LLM和统一查询构建器）
+    if query_planner is None:
+        query_planner = QueryPlanner(llm_client, unified_query_builder)
+
+    # 初始化其他依赖LLM的服务
+    if answer_generator is None:
+        answer_generator = AnswerGenerator(llm_client)
 
     return llm_client, kg_retriever, entity_recognizer, query_planner, answer_generator
 

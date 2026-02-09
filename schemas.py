@@ -29,13 +29,19 @@ entity_recognition_schema = {
             "enum": [
                 "entity_info",        # 查询单个实体信息
                 "relation_query",     # 查询关系
+                "list_query",         # 列举查询
+                "count_query",        # 统计查询
+                "exploration_query",  # 探索查询
                 "comparison",         # 对比分析
                 "event_query",        # 事件查询
-                "chain_analysis",     # 产业链分析
-                "impact_analysis",    # 影响分析
                 "general_question"    # 通用问题
             ],
             "description": "查询意图"
+        },
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "提取的关键词（用于list_query等）"
         },
         "relation_types": {
             "type": "array",

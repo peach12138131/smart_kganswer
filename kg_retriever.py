@@ -16,7 +16,7 @@ class KGRetriever:
         初始化 Neo4j 连接
 
         Args:
-            uri: Neo4j URI (e.g., "bolt://47.237.177.27:8304")
+            uri: Neo4j URI 
             username: 用户名
             password: 密码
         """

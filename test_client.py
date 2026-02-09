@@ -237,45 +237,16 @@ def test_health():
 
 def main():
     """主测试流程"""
-    # print("\n" + "=" * 80)
-    # print("[*] 智能知识图谱检索 - 测试客户端")
-    # print("=" * 80)
-
-    # # 1. 健康检查
-    # test_health()
-
-    # # 2. 模糊搜索测试
-    # test_fuzzy_search("Gulf", limit=3)
-
-    # 3. 实体信息测试
-    # test_entity_info("Starlink", relations="MANUFACTURES", limit=5)
-
-    # # 4. 智能查询测试 - 简单查询
+   
     # test_intelligent_query(
-    #     "Gulfstream 是什么公司？",
-    #     stream=False,
-    #     debug=True
-    # )
-
-    # # 5. 智能查询测试 - 关系查询（流式）
-    # test_intelligent_query(
-    #     "Gulfstream 制造了哪些飞机？",
+    #     "你现在数据库中存有哪些机场",
     #     stream=True,
-    #     debug=True
+    #     debug=True,
     # )
-
-    # # 6. 智能查询测试 - 对比分析
-    # test_intelligent_query(
-    #     "比较 NetJets 和 Flexjet",
-    #     stream=False,
-    #     debug=False
-    # )
-
-    # 7. 智能查询测试 - 复杂查询
     test_intelligent_query(
-        "我想详细了解Citation II坠机",
+        "Abu Dhabi International Airport FBO供应商有哪些",
         stream=True,
-        debug=False,
+        debug=True,
     )
 
     print("\n" + "=" * 80)
