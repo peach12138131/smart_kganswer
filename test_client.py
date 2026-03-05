@@ -8,7 +8,9 @@ import json
 import time
 
 
-API_BASE = "http://localhost:8309/api/kg"
+# API_BASE = "https://ai.avi-go.com/kg_analysis/api/kg"
+
+API_BASE = "http://localhost:8309/api/kg/"
 
 
 def test_intelligent_query(question: str, stream: bool = False, debug: bool = False):
@@ -244,7 +246,7 @@ def main():
     #     debug=True,
     # )
     test_intelligent_query(
-        "Abu Dhabi International Airport FBO供应商有哪些",
+        "AirAisa X 收购了那家公司",
         stream=True,
         debug=True,
     )
